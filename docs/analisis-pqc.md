@@ -65,3 +65,48 @@ Fuentes: NIST (2024a) para ML-KEM, NIST (2024b) para ML-DSA y NIST (2024c) para 
 Fuente: Westerbaan (2024), con mediciones de Cloudflare; los valores varían según la plataforma.
 
 La tabla muestra que ML-DSA verifica más rápido que Ed25519 y firma unas 5 veces más lento, lo que es aceptable para un servidor. SLH-DSA-128s, en cambio, tarda unas 8000 veces más que Ed25519 en firmar. ML-KEM es también rápido: su encapsulamiento cuesta del orden de decenas de microsegundos, comparable con X25519, de modo que su costo real en TLS no es el cómputo sino los bytes (Bos et al., 2018).
+
+## 3. Comparación de tamaños con la criptografía clásica e impacto en TLS 1.3 híbrido
+
+| Algoritmo | Tipo | Clave pública | Clave privada | Firma o ciphertext | Nivel de seguridad | Fuente |
+|---|---|---|---|---|---|---|
+| RSA-3072 | Cifrado y firma clásicos | ≈ 400 bytes (módulo de 384 bytes más exponente y codificación) | ≈ 1600 bytes | 384 bytes (firma) | ≈ 128 bits clásicos, no post-cuántico | NIST (2023) |
+| ECDSA P-256 | Firma clásica | 64 bytes | 32 bytes | 64 bytes en bruto; 70–72 en DER | ≈ 128 bits clásicos, no post-cuántico | NIST (2023) |
+| X25519 | Intercambio de claves clásico | 32 bytes | 32 bytes | No aplica | ≈ 128 bits clásicos, no post-cuántico | Langley et al. (2016) |
+| ML-KEM-768 | KEM post-cuántico | 1184 bytes | 2400 bytes | 1088 bytes (ciphertext) | Nivel NIST 3 | NIST (2024a) |
+| ML-DSA-65 | Firma post-cuántica | 1952 bytes | 4032 bytes | 3309 bytes | Nivel NIST 3 | NIST (2024b) |
+| SLH-DSA-128s | Firma post-cuántica basada en hash | 32 bytes | 64 bytes | 7856 bytes | Nivel NIST 1 | NIST (2024c) |
+
+La clave pública de ML-KEM-768 es 37 veces mayor que la de X25519 (1184 frente a 32 bytes), y una firma ML-DSA-65 es 46 veces mayor que una firma ECDSA P-256 en DER (3309 frente a unos 72 bytes).
+
+**Intercambio de claves.** En TLS 1.3, el grupo híbrido X25519MLKEM768 concatena las dos claves. El campo `key_share` del ClientHello pasa de 32 bytes a 32 + 1184 = 1216 bytes, y el del ServerHello de 32 a 32 + 1088 = 1120 bytes. Un ClientHello clásico ocupa unos pocos cientos de bytes, así que con el componente post-cuántico suele superar el tamaño de un paquete Ethernet de 1500 bytes y dividirse en dos segmentos TCP. Eso no agrega una ida y vuelta, porque la ventana de congestión inicial de TCP es de 10 segmentos, unos 14 600 bytes (Chu et al., 2013). El problema que sí apareció en la práctica fue de compatibilidad: algunos balanceadores y *middleboxes* suponían que el ClientHello siempre cabe en un solo paquete y cortaban la conexión (Westerbaan, 2024). Chrome activó el intercambio híbrido por defecto en 2024 y adoptó el nombre estandarizado X25519MLKEM768 en su versión 131 (Google, 2024).
+
+**Firmas y certificados.** El mayor costo aparece si también se migra la autenticación. Una cadena típica envía dos certificados, cada uno con una clave pública y una firma, más la firma `CertificateVerify` del handshake. Con ML-DSA-65 eso suma 2 × (1952 + 3309) + 3309 = 13 831 bytes solo en material criptográfico, frente a unos 2 × (64 + 72) + 72 ≈ 350 bytes con ECDSA P-256. Sumando el ServerHello híbrido y la codificación de los certificados, la respuesta del servidor ronda o supera los 14 600 bytes de la ventana inicial; cuando los supera, el servidor debe esperar un acuse de recibo antes de terminar de enviar: una ida y vuelta adicional. En una red con 30 ms de latencia es casi imperceptible, pero en una red móvil con 200 ms y pérdida de paquetes se nota. Por eso la industria migró primero el intercambio de claves, que protege contra HNDL con un costo bajo, y la autenticación avanza más lento (Westerbaan, 2024).
+
+## 4. Plan de migración para tres perfiles
+
+Los tres planes siguen las cinco etapas que recomiendan CISA, NSA y NIST (2023): inventario, clasificación de los datos por horizonte de sensibilidad, criptografía híbrida como transición, cronograma por fases y gestión de riesgos. La prioridad se calcula con la desigualdad de Mosca: si el tiempo que los datos deben permanecer seguros (x) más el tiempo que toma migrar (y) supera el tiempo que falta para un computador cuántico relevante (z), la migración ya está atrasada (Mosca, 2018). Con z estimado entre 2030 y 2035, una migración de 3 años implica que todo dato con x mayor que unos 4 a 9 años ya está expuesto.
+
+### Perfil A: hospital universitario
+
+- **Inventario.** El TLS del portal de pacientes (X25519 y certificados ECDSA), las VPN con las sedes, la firma ECDSA de prescripciones, las copias de respaldo cifradas y las integraciones HL7/FHIR con aseguradoras.
+- **Clasificación.** La historia clínica debe ser confidencial durante 50 a 75 años, así que x ≫ z: es el caso más expuesto a HNDL. Las prescripciones requieren autenticidad en el momento de emisión, no confidencialidad de largo plazo.
+- **Estrategia híbrida.** X25519MLKEM768 en el portal y en las VPN; ML-KEM-1024 para el cifrado de respaldos de largo plazo; ML-DSA-65 para firmar prescripciones (ver Decisión 3).
+- **Cronograma.** Fase 1, primer semestre: inventario y activación del intercambio híbrido en el portal, donde los navegadores ya lo soportan. Fase 2, primer año: VPN entre sedes e integraciones con terceros. Fase 3, segundo año: certificados y firma de prescripciones con ML-DSA. Fase 4, tercer año: re-cifrado de respaldos y archivos históricos con claves derivadas de ML-KEM y AES-256.
+- **Riesgos y mitigación.** Equipos médicos con firmware antiguo que no soportan TLS 1.3: aislarlos tras una pasarela que termine el TLS híbrido. Integraciones con aseguradoras sin soporte: el modo híbrido permite caer al algoritmo clásico sin cortar el servicio mientras se negocia el cambio.
+
+### Perfil B: startup de comercio electrónico
+
+- **Inventario.** TLS 1.3 con X25519 y ECDSA en la tienda y la API, tokens de sesión, cifrado AES-256 de la base de datos y la integración con la pasarela de pagos certificada PCI-DSS.
+- **Clasificación.** Los datos de tarjetas tienen una vida de 5 a 7 años; los datos de compras y de clientes, algo más. Con x ≈ 7 y z ≈ 2030-2035, el riesgo existe pero es menor que en salud.
+- **Estrategia híbrida.** X25519MLKEM768 en el CDN y el balanceador, que en la mayoría de los proveedores ya es una opción de configuración. AES-256 se mantiene.
+- **Cronograma.** Fase 1, primer trimestre: activar el intercambio híbrido en el CDN y medir la tasa de conexiones fallidas. Fase 2, primer año: exigirlo en las conexiones entre servicios internos y con la pasarela de pagos. Fase 3, entre 2028 y 2030: certificados ML-DSA cuando los emitan las autoridades de certificación públicas.
+- **Riesgos y mitigación.** Clientes con *middleboxes* antiguos: el modo híbrido mantiene la compatibilidad. Sobrecosto en el handshake: medir el tiempo hasta el primer byte antes y después de activarlo.
+
+### Perfil C: entidad gubernamental de defensa
+
+- **Inventario.** La PKI nacional para documentos oficiales, las VPN entre agencias, los enlaces de comunicaciones clasificadas, la firma de software y firmware de los equipos.
+- **Clasificación.** Sensibilidad de 25 a 50 años. Es el caso con mayor x y el que tiene plazos obligatorios.
+- **Estrategia.** CNSA 2.0 exige ML-KEM-1024, ML-DSA-87, AES-256 y SHA-384, más LMS o XMSS para la firma de firmware (NSA, 2022). El modo híbrido sirve solo como paso intermedio.
+- **Cronograma según CNSA 2.0.** Firma de software y firmware: soportar y preferir PQC desde 2025, uso exclusivo en 2030. Equipos de red como VPN y enrutadores: soportar desde 2026, exclusivo en 2030. Navegadores, servidores y nube: soportar desde 2025, exclusivo en 2033. Sistemas operativos: soportar desde 2027, exclusivo en 2033 (NSA, 2022).
+- **Riesgos y mitigación.** Equipos legados sin capacidad de actualización: reemplazarlos dentro del plazo. Dependencia de un solo tipo de problema matemático: mantener SLH-DSA o LMS como respaldo para las raíces de la PKI.
