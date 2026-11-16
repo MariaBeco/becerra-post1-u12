@@ -110,3 +110,57 @@ Los tres planes siguen las cinco etapas que recomiendan CISA, NSA y NIST (2023):
 - **Estrategia.** CNSA 2.0 exige ML-KEM-1024, ML-DSA-87, AES-256 y SHA-384, más LMS o XMSS para la firma de firmware (NSA, 2022). El modo híbrido sirve solo como paso intermedio.
 - **Cronograma según CNSA 2.0.** Firma de software y firmware: soportar y preferir PQC desde 2025, uso exclusivo en 2030. Equipos de red como VPN y enrutadores: soportar desde 2026, exclusivo en 2030. Navegadores, servidores y nube: soportar desde 2025, exclusivo en 2033. Sistemas operativos: soportar desde 2027, exclusivo en 2033 (NSA, 2022).
 - **Riesgos y mitigación.** Equipos legados sin capacidad de actualización: reemplazarlos dentro del plazo. Dependencia de un solo tipo de problema matemático: mantener SLH-DSA o LMS como respaldo para las raíces de la PKI.
+
+## 5. Decisiones técnicas de la Parte 2
+
+### Decisión 3: ¿qué algoritmo NIST es el correcto para firmar las prescripciones del Perfil A?
+
+ML-KEM queda descartado de entrada. Es un mecanismo de encapsulamiento de claves: sirve para que dos partes acuerden un secreto compartido, pero no produce una firma que un tercero pueda verificar con una clave pública. Firmar una prescripción requiere probar quién la emitió y que no cambió, y eso solo lo ofrecen ML-DSA y SLH-DSA (NIST, 2024a).
+
+Entre los dos esquemas de firma, el volumen y la latencia favorecen a ML-DSA-65. Su firma ocupa 3309 bytes, frente a los 7856 de SLH-DSA-128s, es decir, 2,4 veces menos espacio por prescripción almacenada y transmitida. La diferencia en tiempo de firma es mayor todavía: en las mediciones de Cloudflare al nivel de AES-128, ML-DSA firma unas 4,8 veces más lento que Ed25519, mientras que SLH-DSA-128s tarda unas 8000 veces más (Westerbaan, 2024). Con miles de prescripciones al día firmadas en el momento en que el médico las emite, SLH-DSA-128s introduciría una espera visible en el portal; ML-DSA no.
+
+El argumento conservador a favor de SLH-DSA no se aplica a este caso. La amenaza HNDL afecta la confidencialidad: un dato cifrado hoy puede leerse en el futuro. Una firma, en cambio, demuestra la autenticidad en el momento de la emisión. Si dentro de 30 años se rompiera ML-DSA, el atacante podría falsificar firmas nuevas, pero eso no cambia que la prescripción original fue verificada y registrada cuando se emitió. El horizonte de 50 a 75 años de la historia clínica obliga a cifrarla con ML-KEM, no a firmar cada prescripción con el esquema más lento. Se recomienda ML-DSA-65 como algoritmo principal y SLH-DSA para los certificados raíz del hospital, que se firman pocas veces, deben durar décadas y son los que más se benefician de una asunción de seguridad independiente de los retículos.
+
+### Decisión 4: ¿modo híbrido permanente o etapa de transición para el Perfil B?
+
+El modo híbrido conviene desde ahora porque su costo es bajo y su beneficio es alto. En la Sección 3 se calculó que X25519MLKEM768 agrega 1184 bytes al ClientHello y 1088 al ServerHello; eso cabe dentro de la ventana inicial de TCP de unos 14 600 bytes y no agrega idas y vueltas en una conexión normal. Además, la startup no necesita desarrollar nada: los navegadores y los CDN ya lo negocian por defecto (Google, 2024). Esperar a que la migración sea obligatoria no ahorraría casi nada y dejaría expuesto al HNDL el tráfico de los próximos años, cuyos datos de clientes siguen siendo sensibles durante 5 a 7 años.
+
+La doble protección es valiosa porque los dos riesgos son independientes. Un computador cuántico rompería X25519, pero no ML-KEM. Un avance de criptoanálisis clásico contra MLWE rompería ML-KEM, pero no X25519. El riesgo del segundo caso no es teórico: SIKE, candidato de la cuarta ronda del mismo proceso del NIST, se rompió en 2022 con un computador portátil en unas horas, con un ataque clásico (Castryck & Decru, 2023). ML-KEM tiene menos de una década de escrutinio público como estándar, mientras que las curvas elípticas acumulan más de 30 años. Mientras esa diferencia exista, combinar los dos garantiza que la sesión siga segura si cualquiera de ellos resiste.
+
+Sin embargo, el modo híbrido no debe ser permanente. Duplica el código criptográfico que hay que mantener y auditar, y el componente clásico perderá su valor cuando un computador cuántico relevante sea una amenaza real. Lo razonable es planear el paso a ML-KEM puro cuando los algoritmos acumulen suficiente escrutinio y los estándares lo indiquen, con CNSA 2.0 como referencia: uso exclusivo de PQC en servidores y nube hacia 2033 (NSA, 2022). Como el Perfil B tiene datos de vida corta y menos exigencias regulatorias que el Perfil C, puede hacer ese cambio más tarde y con menor urgencia que una entidad de defensa.
+
+## Conclusiones
+
+La computación cuántica rompe por completo la criptografía asimétrica actual y solo debilita la simétrica, por lo que la migración se concentra en reemplazar RSA y las curvas elípticas. Los estándares del NIST de 2024 cubren las dos necesidades: ML-KEM para establecer claves y ML-DSA o SLH-DSA para firmar. Su principal costo no es el cómputo sino el tamaño: claves 37 veces mayores en el intercambio y firmas 46 veces mayores en la autenticación. Ese costo es pequeño en el intercambio de claves, que ya se despliega en modo híbrido, y significativo en los certificados, donde puede agregar una ida y vuelta al handshake. La urgencia de cada organización depende del horizonte de sus datos: un hospital con historias clínicas de 75 años debe empezar de inmediato, una tienda en línea puede apoyarse en lo que ya ofrecen su CDN y los navegadores, y una entidad de defensa debe seguir los plazos obligatorios de CNSA 2.0.
+
+## Referencias
+
+Bernstein, D. J., & Lange, T. (2017). Post-quantum cryptography. *Nature, 549*(7671), 188–194. https://doi.org/10.1038/nature23461
+
+Bos, J., Ducas, L., Kiltz, E., Lepoint, T., Lyubashevsky, V., Schanck, J. M., Schwabe, P., Seiler, G., & Stehlé, D. (2018). CRYSTALS-Kyber: A CCA-secure module-lattice-based KEM. En *2018 IEEE European Symposium on Security and Privacy* (pp. 353–367). IEEE. https://doi.org/10.1109/EuroSP.2018.00032
+
+Castryck, W., & Decru, T. (2023). An efficient key recovery attack on SIDH. En *Advances in Cryptology – EUROCRYPT 2023* (pp. 423–447). Springer. https://doi.org/10.1007/978-3-031-30589-4_15
+
+Chu, J., Dukkipati, N., Cheng, Y., & Mathis, M. (2013). *Increasing TCP's initial window* (RFC 6928). Internet Engineering Task Force. https://doi.org/10.17487/RFC6928
+
+Cybersecurity and Infrastructure Security Agency, National Security Agency, & National Institute of Standards and Technology. (2023). *Quantum-readiness: Migration to post-quantum cryptography* [Hoja informativa]. https://www.cisa.gov/resources-tools/resources/quantum-readiness-migration-post-quantum-cryptography
+
+Gidney, C. (2025). *How to factor 2048 bit RSA integers with less than a million noisy qubits* (arXiv:2505.15917). arXiv. https://arxiv.org/abs/2505.15917
+
+Google. (2024, septiembre). *A new path for Kyber on the web*. Google Online Security Blog. https://security.googleblog.com/
+
+Langley, A., Hamburg, M., & Turner, S. (2016). *Elliptic curves for security* (RFC 7748). Internet Engineering Task Force. https://doi.org/10.17487/RFC7748
+
+Mosca, M. (2018). Cybersecurity in an era with quantum computers: Will we be ready? *IEEE Security & Privacy, 16*(5), 38–41. https://doi.org/10.1109/MSP.2018.3761723
+
+National Institute of Standards and Technology. (2023). *Digital signature standard (DSS)* (FIPS 186-5). https://doi.org/10.6028/NIST.FIPS.186-5
+
+National Institute of Standards and Technology. (2024a). *Module-lattice-based key-encapsulation mechanism standard* (FIPS 203). https://doi.org/10.6028/NIST.FIPS.203
+
+National Institute of Standards and Technology. (2024b). *Module-lattice-based digital signature standard* (FIPS 204). https://doi.org/10.6028/NIST.FIPS.204
+
+National Institute of Standards and Technology. (2024c). *Stateless hash-based digital signature standard* (FIPS 205). https://doi.org/10.6028/NIST.FIPS.205
+
+National Security Agency. (2022). *Announcing the Commercial National Security Algorithm Suite 2.0*. https://media.defense.gov/2022/Sep/07/2003071834/-1/-1/0/CSA_CNSA_2.0_ALGORITHMS_.PDF
+
+Westerbaan, B. (2024, 5 de marzo). *The state of the post-quantum Internet*. The Cloudflare Blog. https://blog.cloudflare.com/pq-2024/
